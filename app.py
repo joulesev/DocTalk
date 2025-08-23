@@ -14,7 +14,6 @@ st.set_page_config(
 )
 
 # --- VALIDACIÓN DE SECRETOS ---
-# Verifica que los secretos necesarios estén configurados en Streamlit
 if "gcp_service_account" not in st.secrets or "GEMINI_API_KEY" not in st.secrets:
     st.error("🚨 ¡Error de configuración! Faltan secretos en tu aplicación de Streamlit.")
     st.warning(
@@ -25,38 +24,26 @@ if "gcp_service_account" not in st.secrets or "GEMINI_API_KEY" not in st.secrets
 
 # --- CONFIGURACIÓN DE APIS ---
 try:
-    # Configura la API de Gemini
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-
-    # Configura las credenciales de Google Drive desde los secretos
     SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
     drive_service = build("drive", "v3", credentials=creds)
-
 except Exception as e:
     st.error(f"🚨 Error al configurar las APIs: {e}")
     st.stop()
 
-
-# --- LÓGICA DE LA APLICACIÓN (con caché para eficiencia) ---
-
-@st.cache_data(ttl=600) # Cachea el contenido del documento por 10 minutos
+# --- LÓGICA DE LA APLICACIÓN ---
+@st.cache_data(ttl=600)
 def get_google_doc_content(url):
-    """Extrae el texto de un documento de Google Drive desde su URL."""
     try:
-        # Extrae el ID del documento de la URL
         doc_id = url.split('/d/')[1].split('/')[0]
-        
         request = drive_service.files().export_media(fileId=doc_id, mimeType="text/plain")
-        
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
             status, done = downloader.next_chunk()
-
         return fh.getvalue().decode('utf-8')
-
     except (IndexError, AttributeError):
         st.error("URL no válida. Asegúrate de que sea un enlace a un Google Doc.")
         return None
@@ -71,19 +58,14 @@ def get_google_doc_content(url):
         return None
 
 # --- INTERFAZ DE LA APLICACIÓN ---
-
 st.title("💬 Chatbot para Google Docs")
 st.markdown("Pega la URL de un documento de Google Drive y haz preguntas sobre su contenido.")
-
 st.markdown("---")
 
-# Entrada de la URL
 url = st.text_input(
     "Paso 1: Pega la URL de tu Google Doc aquí",
     placeholder="https://docs.google.com/document/d/..."
 )
-
-# Entrada de la pregunta
 question = st.text_area(
     "Paso 2: Haz tu pregunta sobre el documento",
     height=150,
@@ -91,10 +73,8 @@ question = st.text_area(
 )
 
 if st.button("Enviar Pregunta", type="primary", use_container_width=True):
-    if not url.strip():
-        st.warning("Por favor, introduce una URL.")
-    elif not question.strip():
-        st.warning("Por favor, escribe una pregunta.")
+    if not url.strip() or not question.strip():
+        st.warning("Por favor, introduce una URL y una pregunta.")
     else:
         with st.spinner("🔗 Accediendo al documento..."):
             document_text = get_google_doc_content(url)
@@ -103,7 +83,9 @@ if st.button("Enviar Pregunta", type="primary", use_container_width=True):
             st.success("📄 Documento leído correctamente.")
             with st.spinner("🤖 Gemini está analizando y pensando..."):
                 try:
-                    model = genai.GenerativeModel('gemini-pro')
+                    # --- LÍNEA CORREGIDA ---
+                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                    
                     prompt = f"""
                     Analiza el siguiente texto y responde la pregunta.
                     Tu respuesta debe basarse estricta y únicamente en la información del texto.
@@ -120,6 +102,5 @@ if st.button("Enviar Pregunta", type="primary", use_container_width=True):
                     st.markdown("---")
                     st.subheader("Respuesta de Gemini:")
                     st.markdown(response.text)
-
                 except Exception as e:
                     st.error(f"Ocurrió un error al contactar a Gemini: {e}")
