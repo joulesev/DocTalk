@@ -7,11 +7,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-# --- NUEVAS LIBRERÍAS PARA RAG ---
+# --- LIBRERÍAS CORREGIDAS PARA RAG ---
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
