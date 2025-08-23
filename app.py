@@ -8,8 +8,8 @@ from googleapiclient.http import MediaIoBaseDownload
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
-    page_title="Chat con Google Docs",
-    page_icon="🤖",
+    page_title="Análisis de Documentos con IA",
+    page_icon="🧠",
     layout="wide"
 )
 
@@ -33,7 +33,7 @@ except Exception as e:
     st.stop()
 
 # --- LÓGICA DE LA APLICACIÓN ---
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300) # Cachea el contenido por 5 minutos
 def get_google_doc_content(url):
     try:
         doc_id = url.split('/d/')[1].split('/')[0]
@@ -58,49 +58,66 @@ def get_google_doc_content(url):
         return None
 
 # --- INTERFAZ DE LA APLICACIÓN ---
-st.title("💬 Chatbot para Google Docs")
-st.markdown("Pega la URL de un documento de Google Drive y haz preguntas sobre su contenido.")
-st.markdown("---")
+st.title("🧠 Analizador de Documentos con IA")
+st.markdown("Esta herramienta utiliza Gemini para analizar el contenido de un Google Doc y responder tus preguntas.")
 
-url = st.text_input(
-    "Paso 1: Pega la URL de tu Google Doc aquí",
-    placeholder="https://docs.google.com/document/d/..."
-)
-question = st.text_area(
-    "Paso 2: Haz tu pregunta sobre el documento",
-    height=150,
-    placeholder="¿Qué quieres saber?"
-)
+# Contenedor para la entrada de datos
+with st.container(border=True):
+    st.subheader("1. Proporciona el Documento")
+    url = st.text_input(
+        "Pega la URL de tu Google Doc aquí",
+        placeholder="https://docs.google.com/document/d/..."
+    )
 
-if st.button("Enviar Pregunta", type="primary", use_container_width=True):
-    if not url.strip() or not question.strip():
-        st.warning("Por favor, introduce una URL y una pregunta.")
-    else:
-        with st.spinner("🔗 Accediendo al documento..."):
-            document_text = get_google_doc_content(url)
+# Dos columnas para la pregunta y la respuesta
+col1, col2 = st.columns(2)
+
+with col1:
+    with st.container(border=True):
+        st.subheader("2. Haz tu Pregunta")
+        question = st.text_area(
+            "¿Qué quieres saber sobre el documento?",
+            height=150,
+            placeholder="Ej: ¿Cuál es el estado actual del proyecto Hydra?"
+        )
+        submit_button = st.button("Analizar y Responder", type="primary", use_container_width=True)
+
+with col2:
+    with st.container(border=True):
+        st.subheader("3. Respuesta de la IA")
+        # Usamos el estado de la sesión para mantener la respuesta
+        if 'response' not in st.session_state:
+            st.session_state.response = "La respuesta aparecerá aquí..."
         
-        if document_text:
-            st.success("📄 Documento leído correctamente.")
-            with st.spinner("🤖 Gemini está analizando y pensando..."):
-                try:
-                    # --- LÍNEA CORREGIDA ---
-                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-                    
-                    prompt = f"""
-                    Analiza el siguiente texto y responde la pregunta.
-                    Tu respuesta debe basarse estricta y únicamente en la información del texto.
-                    Si la respuesta no se encuentra en el texto, indícalo claramente.
+        if submit_button:
+            if not url.strip() or not question.strip():
+                st.warning("Por favor, introduce una URL y una pregunta.")
+                st.session_state.response = "Esperando información..."
+            else:
+                with st.spinner("🔗 Accediendo al documento..."):
+                    document_text = get_google_doc_content(url)
+                
+                if document_text:
+                    st.success("📄 Documento leído.")
+                    with st.spinner("🤖 Gemini está pensando..."):
+                        try:
+                            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                            prompt = f"""
+                            Tu tarea es actuar como un analista de inteligencia.
+                            Analiza el siguiente documento, que está estructurado usando Markdown. Presta especial atención a los encabezados (#), listas (-) y texto en negrita (**) para entender la jerarquía y los datos clave.
+                            Responde la pregunta del usuario de forma concisa y precisa, basándote únicamente en la información proporcionada.
 
-                    --- TEXTO DEL DOCUMENTO ---
-                    {document_text}
-                    --- FIN DEL TEXTO ---
+                            --- DOCUMENTO ---
+                            {document_text}
+                            --- FIN DEL DOCUMENTO ---
 
-                    PREGUNTA:
-                    {question}
-                    """
-                    response = model.generate_content(prompt)
-                    st.markdown("---")
-                    st.subheader("Respuesta de Gemini:")
-                    st.markdown(response.text)
-                except Exception as e:
-                    st.error(f"Ocurrió un error al contactar a Gemini: {e}")
+                            PREGUNTA:
+                            {question}
+                            """
+                            response = model.generate_content(prompt)
+                            st.session_state.response = response.text
+                        except Exception as e:
+                            st.error(f"Ocurrió un error al contactar a Gemini: {e}")
+                            st.session_state.response = "Error al generar la respuesta."
+        
+        st.markdown(st.session_state.response)
