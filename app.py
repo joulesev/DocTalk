@@ -1,91 +1,125 @@
 import streamlit as st
 import google.generativeai as genai
+import io
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
-    page_title="Chat con Texto",
+    page_title="Chat con Google Docs",
     page_icon="🤖",
     layout="wide"
 )
 
-# --- CONFIGURACIÓN DE LA API DE GEMINI ---
-# Para desplegar en Streamlit Community Cloud, debes configurar un "Secreto".
-# 1. En la configuración de tu app en Streamlit, ve a "Settings" > "Secrets".
-# 2. Pega tu clave de API de Gemini así:
-#    GEMINI_API_KEY = "tu_clave_api_aqui"
-
-try:
-    # Intenta configurar la API key desde los secretos de Streamlit
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-except (KeyError, FileNotFoundError):
-    # Si falla, muestra un error claro en la interfaz
-    st.error("🚨 ¡Error de configuración! No se encontró la clave de API de Gemini.")
+# --- VALIDACIÓN DE SECRETOS ---
+# Verifica que los secretos necesarios estén configurados en Streamlit
+if "gcp_service_account" not in st.secrets or "GEMINI_API_KEY" not in st.secrets:
+    st.error("🚨 ¡Error de configuración! Faltan secretos en tu aplicación de Streamlit.")
     st.warning(
-        "Por favor, asegúrate de haber configurado el 'Secreto' de Streamlit "
-        "llamado `GEMINI_API_KEY` en los ajustes de tu aplicación."
+        "Asegúrate de haber configurado `GEMINI_API_KEY` y la tabla `[gcp_service_account]` "
+        "en los ajustes de tu aplicación."
     )
-    # Detiene la ejecución del script si no hay API key
     st.stop()
+
+# --- CONFIGURACIÓN DE APIS ---
+try:
+    # Configura la API de Gemini
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+
+    # Configura las credenciales de Google Drive desde los secretos
+    SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
+    drive_service = build("drive", "v3", credentials=creds)
+
+except Exception as e:
+    st.error(f"🚨 Error al configurar las APIs: {e}")
+    st.stop()
+
+
+# --- LÓGICA DE LA APLICACIÓN (con caché para eficiencia) ---
+
+@st.cache_data(ttl=600) # Cachea el contenido del documento por 10 minutos
+def get_google_doc_content(url):
+    """Extrae el texto de un documento de Google Drive desde su URL."""
+    try:
+        # Extrae el ID del documento de la URL
+        doc_id = url.split('/d/')[1].split('/')[0]
+        
+        request = drive_service.files().export_media(fileId=doc_id, mimeType="text/plain")
+        
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+
+        return fh.getvalue().decode('utf-8')
+
+    except (IndexError, AttributeError):
+        st.error("URL no válida. Asegúrate de que sea un enlace a un Google Doc.")
+        return None
+    except HttpError as error:
+        st.error(
+            f"Error al acceder al documento: {error.reason}. "
+            "Verifica la URL y asegúrate de haber compartido el documento con el 'client_email' de la cuenta de servicio."
+        )
+        return None
+    except Exception as e:
+        st.error(f"Ocurrió un error inesperado: {e}")
+        return None
 
 # --- INTERFAZ DE LA APLICACIÓN ---
 
-st.title("💬 Chatbot de Análisis de Texto")
-st.markdown("Pega cualquier texto en el área de abajo y haz preguntas sobre él. La IA de Gemini te responderá basándose en el contenido.")
+st.title("💬 Chatbot para Google Docs")
+st.markdown("Pega la URL de un documento de Google Drive y haz preguntas sobre su contenido.")
 
 st.markdown("---")
 
-# Columna 1: Entrada de Texto
-st.subheader("Paso 1: Pega el contenido de tu documento aquí")
-document_text = st.text_area(
-    "Contenido del Documento",
-    height=300,
-    placeholder="Pega aquí el texto que quieres analizar...",
-    label_visibility="collapsed"
+# Entrada de la URL
+url = st.text_input(
+    "Paso 1: Pega la URL de tu Google Doc aquí",
+    placeholder="https://docs.google.com/document/d/..."
 )
 
-st.markdown("---")
-
-# Columna 2: Chat
-st.subheader("Paso 2: Haz tu pregunta")
-question = st.text_input(
-    "Pregunta",
-    placeholder="¿Qué quieres saber sobre el texto?",
-    label_visibility="collapsed"
+# Entrada de la pregunta
+question = st.text_area(
+    "Paso 2: Haz tu pregunta sobre el documento",
+    height=150,
+    placeholder="¿Qué quieres saber?"
 )
 
 if st.button("Enviar Pregunta", type="primary", use_container_width=True):
-    # Validaciones de entrada
-    if not document_text.strip():
-        st.warning("Por favor, pega el texto de un documento en el área de contenido.")
+    if not url.strip():
+        st.warning("Por favor, introduce una URL.")
     elif not question.strip():
         st.warning("Por favor, escribe una pregunta.")
     else:
-        # Si todo está bien, procede a llamar a la IA
-        with st.spinner("🤖 Gemini está analizando el texto y pensando en tu respuesta..."):
-            try:
-                # Configura el modelo de IA
-                model = genai.GenerativeModel('gemini-pro')
+        with st.spinner("🔗 Accediendo al documento..."):
+            document_text = get_google_doc_content(url)
+        
+        if document_text:
+            st.success("📄 Documento leído correctamente.")
+            with st.spinner("🤖 Gemini está analizando y pensando..."):
+                try:
+                    model = genai.GenerativeModel('gemini-pro')
+                    prompt = f"""
+                    Analiza el siguiente texto y responde la pregunta.
+                    Tu respuesta debe basarse estricta y únicamente en la información del texto.
+                    Si la respuesta no se encuentra en el texto, indícalo claramente.
 
-                # Crea el prompt con instrucciones claras
-                prompt = f"""
-                Analiza el siguiente texto y responde la pregunta del usuario.
-                Tu respuesta debe basarse estricta y únicamente en la información contenida en el texto proporcionado.
-                Si la respuesta no se puede encontrar en el texto, indícalo claramente.
+                    --- TEXTO DEL DOCUMENTO ---
+                    {document_text}
+                    --- FIN DEL TEXTO ---
 
-                --- TEXTO PROPORCIONADO ---
-                {document_text}
-                --- FIN DEL TEXTO ---
+                    PREGUNTA:
+                    {question}
+                    """
+                    response = model.generate_content(prompt)
+                    st.markdown("---")
+                    st.subheader("Respuesta de Gemini:")
+                    st.markdown(response.text)
 
-                PREGUNTA DEL USUARIO:
-                {question}
-                """
-
-                # Genera la respuesta
-                response = model.generate_content(prompt)
-
-                # Muestra la respuesta
-                st.success("¡Respuesta generada!")
-                st.markdown(response.text)
-
-            except Exception as e:
-                st.error(f"Ocurrió un error al contactar a la IA: {e}")
+                except Exception as e:
+                    st.error(f"Ocurrió un error al contactar a Gemini: {e}")
