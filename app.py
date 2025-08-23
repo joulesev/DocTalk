@@ -8,8 +8,7 @@ from googleapiclient.http import MediaIoBaseDownload
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
-    page_title="Análisis de Documentos con IA",
-    page_icon="🧠",
+    page_title="DocTalk",
     layout="wide"
 )
 
@@ -58,7 +57,7 @@ def get_google_doc_content(url):
         return None
 
 # --- INTERFAZ DE LA APLICACIÓN ---
-st.title("🧠 Analizador de Documentos con IA")
+st.title("DocTalk")
 st.markdown("Esta herramienta utiliza Gemini para analizar el contenido de un Google Doc y responder tus preguntas.")
 
 # Contenedor para la entrada de datos
