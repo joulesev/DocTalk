@@ -1,27 +1,30 @@
 import streamlit as st
 import google.generativeai as genai
 import io
+import time
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
+# --- NUEVAS LIBRERÍAS PARA RAG ---
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
-    page_title="DocTalk",
+    page_title="IA de Base de Conocimiento",
+    page_icon="📚",
     layout="wide"
 )
 
-# --- VALIDACIÓN DE SECRETOS ---
+# --- VALIDACIÓN DE SECRETOS Y CONFIGURACIÓN DE APIS ---
 if "gcp_service_account" not in st.secrets or "GEMINI_API_KEY" not in st.secrets:
-    st.error("🚨 ¡Error de configuración! Faltan secretos en tu aplicación de Streamlit.")
-    st.warning(
-        "Asegúrate de haber configurado `GEMINI_API_KEY` y la tabla `[gcp_service_account]` "
-        "en los ajustes de tu aplicación."
-    )
+    st.error("🚨 ¡Error de configuración! Faltan secretos en tu aplicación.")
     st.stop()
 
-# --- CONFIGURACIÓN DE APIS ---
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
@@ -32,91 +35,143 @@ except Exception as e:
     st.stop()
 
 # --- LÓGICA DE LA APLICACIÓN ---
-@st.cache_data(ttl=300) # Cachea el contenido por 5 minutos
-def get_google_doc_content(url):
+
+@st.cache_resource
+def get_all_docs_from_folder(folder_id):
+    """
+    Escanea recursivamente una carpeta de Drive y devuelve una lista de todos los
+    Google Docs encontrados, con su nombre y ID.
+    """
+    docs = []
+    query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.document'"
     try:
-        doc_id = url.split('/d/')[1].split('/')[0]
-        request = drive_service.files().export_media(fileId=doc_id, mimeType="text/plain")
+        results = drive_service.files().list(q=query, fields="nextPageToken, files(id, name)").execute()
+        docs.extend(results.get('files', []))
+
+        # Búsqueda recursiva en subcarpetas
+        folder_query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder'"
+        subfolders = drive_service.files().list(q=folder_query, fields="files(id, name)").execute()
+        for subfolder in subfolders.get('files', []):
+            docs.extend(get_all_docs_from_folder(subfolder.get('id')))
+        return docs
+    except HttpError as error:
+        st.error(f"Error al listar archivos: {error}")
+        return []
+
+@st.cache_data(ttl=600)
+def get_doc_content(_doc_id):
+    """Descarga el contenido de un Google Doc como texto plano."""
+    try:
+        request = drive_service.files().export_media(fileId=_doc_id, mimeType="text/plain")
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
             status, done = downloader.next_chunk()
         return fh.getvalue().decode('utf-8')
-    except (IndexError, AttributeError):
-        st.error("URL no válida. Asegúrate de que sea un enlace a un Google Doc.")
-        return None
     except HttpError as error:
-        st.error(
-            f"Error al acceder al documento: {error.reason}. "
-            "Verifica la URL y asegúrate de haber compartido el documento con el 'client_email' de la cuenta de servicio."
-        )
+        # Silenciamos errores de conversión para no detener el proceso
+        print(f"No se pudo convertir el doc {_doc_id}: {error}")
+        return ""
+
+def create_vector_db(docs):
+    """
+    Toma una lista de documentos, los divide en fragmentos y crea una base de datos
+    vectorial (FAISS) para búsquedas de similitud.
+    """
+    if not docs:
         return None
-    except Exception as e:
-        st.error(f"Ocurrió un error inesperado: {e}")
-        return None
+    
+    with st.status("Construyendo base de conocimiento...", expanded=True) as status:
+        all_texts = ""
+        for i, doc in enumerate(docs):
+            status.write(f"📄 Leyendo documento {i+1}/{len(docs)}: {doc['name']}...")
+            content = get_doc_content(doc['id'])
+            all_texts += content + "\n\n"
+            time.sleep(0.1) # Pequeña pausa para que la UI se actualice
+
+        status.write("쪼 Dividiendo textos en fragmentos...")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = text_splitter.split_text(all_texts)
+        
+        status.write("🧠 Creando 'embeddings' (representaciones numéricas)...")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        
+        status.write("💾 Construyendo el índice de búsqueda...")
+        vector_db = FAISS.from_texts(chunks, embedding=embeddings)
+        
+        status.update(label="¡Base de conocimiento lista!", state="complete")
+    
+    return vector_db
 
 # --- INTERFAZ DE LA APLICACIÓN ---
-st.title("DocTalk")
-st.markdown("Esta herramienta utiliza Gemini para analizar el contenido de un Google Doc y responder tus preguntas.")
+st.title("📚 IA de Base de Conocimiento (Google Drive)")
+st.markdown("Proporciona una URL de una carpeta de Google Drive para crear una base de conocimiento y luego haz preguntas sobre su contenido.")
 
-# Contenedor para la entrada de datos
+# Inicializar el estado de la sesión
+if 'vector_db' not in st.session_state:
+    st.session_state.vector_db = None
+
 with st.container(border=True):
-    st.subheader("1. Proporciona el Documento")
-    url = st.text_input(
-        "Pega la URL de tu Google Doc aquí",
-        placeholder="https://docs.google.com/document/d/..."
+    st.subheader("1. Construir la Base de Conocimiento")
+    folder_url = st.text_input(
+        "Pega la URL de la carpeta principal de Google Drive aquí",
+        placeholder="https://drive.google.com/drive/folders/..."
     )
 
-# Dos columnas para la pregunta y la respuesta
-col1, col2 = st.columns(2)
+    if st.button("Indexar Carpeta", type="primary", use_container_width=True):
+        if folder_url:
+            try:
+                folder_id = folder_url.split('/')[-1]
+                all_docs = get_all_docs_from_folder(folder_id)
+                if all_docs:
+                    st.session_state.vector_db = create_vector_db(all_docs)
+                else:
+                    st.warning("No se encontraron documentos de Google en la carpeta o subcarpetas.")
+            except (IndexError, AttributeError):
+                st.error("URL de carpeta no válida.")
+        else:
+            st.warning("Por favor, introduce una URL de carpeta.")
 
-with col1:
-    with st.container(border=True):
-        st.subheader("2. Haz tu Pregunta")
-        question = st.text_area(
-            "¿Qué quieres saber sobre el documento?",
-            height=150,
-            placeholder="Ej: ¿Cuál es el estado actual del proyecto Hydra?"
-        )
-        submit_button = st.button("Analizar y Responder", type="primary", use_container_width=True)
+st.markdown("---")
 
-with col2:
-    with st.container(border=True):
-        st.subheader("3. Respuesta de la IA")
-        # Usamos el estado de la sesión para mantener la respuesta
-        if 'response' not in st.session_state:
-            st.session_state.response = "La respuesta aparecerá aquí..."
-        
-        if submit_button:
-            if not url.strip() or not question.strip():
-                st.warning("Por favor, introduce una URL y una pregunta.")
-                st.session_state.response = "Esperando información..."
-            else:
-                with st.spinner("🔗 Accediendo al documento..."):
-                    document_text = get_google_doc_content(url)
+with st.container(border=True):
+    st.subheader("2. Haz tu Pregunta")
+    question = st.text_area(
+        "¿Qué quieres saber sobre el contenido de la carpeta?",
+        height=100,
+        disabled=(st.session_state.vector_db is None)
+    )
+
+    if st.button("Obtener Respuesta", use_container_width=True, disabled=(st.session_state.vector_db is None)):
+        if question:
+            with st.spinner("🧠 Buscando en la base de conocimiento y generando respuesta..."):
+                # Configura el modelo de lenguaje de Gemini
+                llm = genai.GenerativeModel('gemini-1.5-flash-latest')
                 
-                if document_text:
-                    st.success("📄 Documento leído.")
-                    with st.spinner("🤖 Gemini está pensando..."):
-                        try:
-                            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-                            prompt = f"""
-                            Tu tarea es actuar como un analista de inteligencia.
-                            Analiza el siguiente documento, que está estructurado usando Markdown. Presta especial atención a los encabezados (#), listas (-) y texto en negrita (**) para entender la jerarquía y los datos clave.
-                            Responde la pregunta del usuario de forma concisa y precisa, basándote únicamente en la información proporcionada.
+                # Realiza la búsqueda de similitud y obtén los fragmentos relevantes
+                retriever = st.session_state.vector_db.as_retriever()
+                relevant_docs = retriever.get_relevant_documents(question)
+                context = "\n\n".join([doc.page_content for doc in relevant_docs])
 
-                            --- DOCUMENTO ---
-                            {document_text}
-                            --- FIN DEL DOCUMENTO ---
+                # Crea el prompt final
+                prompt = f"""
+                Actúa como un analista experto. Tu única fuente de verdad es el siguiente CONTEXTO.
+                Responde la PREGUNTA del usuario de forma clara y concisa basándote exclusivamente en la información del CONTEXTO.
+                Si la respuesta no se encuentra en el CONTEXTO, indica que no tienes suficiente información.
 
-                            PREGUNTA:
-                            {question}
-                            """
-                            response = model.generate_content(prompt)
-                            st.session_state.response = response.text
-                        except Exception as e:
-                            st.error(f"Ocurrió un error al contactar a Gemini: {e}")
-                            st.session_state.response = "Error al generar la respuesta."
-        
-        st.markdown(st.session_state.response)
+                --- CONTEXTO ---
+                {context}
+                --- FIN DEL CONTEXTO ---
+
+                PREGUNTA: {question}
+                """
+                
+                response = llm.generate_content(prompt)
+                st.success("Respuesta generada:")
+                st.markdown(response.text)
+        else:
+            st.warning("Por favor, escribe una pregunta.")
+
+if st.session_state.vector_db is None:
+    st.info("La sección de preguntas se habilitará una vez que la base de conocimiento esté indexada.")
