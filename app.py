@@ -38,10 +38,6 @@ except Exception as e:
 
 @st.cache_resource
 def get_all_docs_from_folder(folder_id):
-    """
-    Escanea recursivamente una carpeta de Drive y devuelve una lista de todos los
-    Google Docs y archivos de texto (.md, .txt) encontrados.
-    """
     docs = []
     query = f"'{folder_id}' in parents and (mimeType='application/vnd.google-apps.document' or mimeType='text/plain' or mimeType='text/markdown')"
     try:
@@ -58,10 +54,6 @@ def get_all_docs_from_folder(folder_id):
 
 @st.cache_data(ttl=600)
 def get_doc_content(doc_object):
-    """
-    Descarga el contenido de un archivo de Drive, usando el método correcto
-    según su tipo.
-    """
     try:
         file_id = doc_object['id']
         mime_type = doc_object['mimeType']
@@ -82,10 +74,6 @@ def get_doc_content(doc_object):
         return ""
 
 def create_vector_db(docs):
-    """
-    Toma una lista de documentos, los divide en fragmentos y crea una base de datos
-    vectorial para búsquedas de similitud.
-    """
     if not docs:
         return None
     
@@ -94,7 +82,7 @@ def create_vector_db(docs):
         for i, doc in enumerate(docs):
             status.write(f"📄 Leyendo documento {i+1}/{len(docs)}: {doc['name']}...")
             content = get_doc_content(doc)
-            if content and content.strip(): # Asegura que el contenido no esté vacío
+            if content and content.strip():
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 chunks = text_splitter.create_documents([content], metadatas=[{"source": doc['name']}])
                 all_texts_with_metadata.extend(chunks)
@@ -104,18 +92,22 @@ def create_vector_db(docs):
              st.warning("No se pudo leer contenido de ningún documento o todos estaban vacíos.")
              return None
 
-        # --- FILTRO DE CALIDAD AÑADIDO ---
-        # Filtra cualquier fragmento que pueda haber quedado vacío después de la división.
         valid_docs = [doc for doc in all_texts_with_metadata if doc.page_content.strip()]
         if not valid_docs:
             st.warning("El contenido de los documentos no generó fragmentos de texto válidos para analizar.")
             return None
 
         status.write("🧠 Creando 'embeddings' (representaciones numéricas)...")
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        
+        # --- LÍNEA CLAVE DE LA CORRECCIÓN ---
+        # Le decimos a la API que el propósito de estos embeddings es para recuperar documentos.
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001",
+            task_type="RETRIEVAL_DOCUMENT"
+        )
         
         status.write("💾 Construyendo el índice de búsqueda...")
-        vector_db = FAISS.from_documents(valid_docs, embedding=embeddings) # Usa la lista filtrada
+        vector_db = FAISS.from_documents(valid_docs, embedding=embeddings)
         
         status.update(label="¡Base de conocimiento lista!", state="complete")
     
