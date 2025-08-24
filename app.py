@@ -105,19 +105,16 @@ def create_vector_db(docs):
         
         status.write("💾 Construyendo el índice de búsqueda en lotes...")
         
-        # --- LÓGICA DE PROCESAMIENTO POR LOTES ---
         batch_size = 100
         vector_db = None
         for i in range(0, len(valid_docs), batch_size):
             batch = valid_docs[i:i+batch_size]
             status.write(f"Procesando lote {i//batch_size + 1}...")
             if vector_db is None:
-                # Crea el índice con el primer lote
                 vector_db = FAISS.from_documents(batch, embedding=embeddings)
             else:
-                # Añade los lotes siguientes al índice existente
                 vector_db.add_documents(batch)
-            time.sleep(0.5) # Pausa para evitar sobrecargar la API
+            time.sleep(0.5)
 
         status.update(label="¡Base de conocimiento lista!", state="complete")
     
@@ -163,4 +160,25 @@ with st.container(border=True):
 
     if st.button("Obtener Respuesta", use_container_width=True, disabled=(st.session_state.vector_db is None)):
         if question:
-            with st.spinner("🧠 Buscando en
+            with st.spinner("🧠 Buscando en la base de conocimiento y generando respuesta..."):
+                llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, convert_system_message_to_human=True)
+                retriever = st.session_state.vector_db.as_retriever()
+                chain = load_qa_chain(llm, chain_type="stuff")
+                relevant_docs = retriever.get_relevant_documents(question)
+                
+                if not relevant_docs:
+                    st.warning("No se encontraron documentos relevantes para tu pregunta en la base de conocimiento.")
+                else:
+                    response = chain.invoke({"input_documents": relevant_docs, "question": question})
+                    st.success("Respuesta generada:")
+                    st.markdown(response['output_text'])
+
+                    with st.expander("Ver fuentes utilizadas"):
+                        sources = sorted(list({doc.metadata['source'] for doc in relevant_docs}))
+                        for source in sources:
+                            st.write(f"- {source}")
+        else:
+            st.warning("Por favor, escribe una pregunta.")
+
+if st.session_state.vector_db is None:
+    st.info("La sección de preguntas se habilitará una vez que la base de conocimiento esté indexada.")
