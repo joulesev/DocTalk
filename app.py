@@ -7,11 +7,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-# --- LIBRERÍAS CORREGIDAS PARA RAG ---
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
     page_title="IA de Base de Conocimiento",
@@ -33,18 +28,19 @@ except Exception as e:
     st.error(f"🚨 Error al configurar las APIs: {e}")
     st.stop()
 
-# --- LÓGICA DE LA APLICACIÓN ---
+# --- LÓGICA DE LA APLICACIÓN (CORREGIDA) ---
 
 @st.cache_resource
 def get_all_docs_from_folder(folder_id):
     """
     Escanea recursivamente una carpeta de Drive y devuelve una lista de todos los
-    Google Docs encontrados, con su nombre y ID.
+    Google Docs y archivos de texto (.md, .txt) encontrados.
     """
     docs = []
-    query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.document'"
+    # Query ampliado para incluir Google Docs Y archivos de texto plano/markdown
+    query = f"'{folder_id}' in parents and (mimeType='application/vnd.google-apps.document' or mimeType='text/plain' or mimeType='text/markdown')"
     try:
-        results = drive_service.files().list(q=query, fields="nextPageToken, files(id, name)").execute()
+        results = drive_service.files().list(q=query, fields="nextPageToken, files(id, name, mimeType)").execute()
         docs.extend(results.get('files', []))
 
         # Búsqueda recursiva en subcarpetas
@@ -58,10 +54,22 @@ def get_all_docs_from_folder(folder_id):
         return []
 
 @st.cache_data(ttl=600)
-def get_doc_content(_doc_id):
-    """Descarga el contenido de un Google Doc como texto plano."""
+def get_doc_content(doc_object):
+    """
+    Descarga el contenido de un archivo de Drive, usando el método correcto
+    según su tipo (Google Doc vs. archivo de texto).
+    """
     try:
-        request = drive_service.files().export_media(fileId=_doc_id, mimeType="text/plain")
+        file_id = doc_object['id']
+        mime_type = doc_object['mimeType']
+        
+        # Si es un Google Doc, se debe "exportar"
+        if mime_type == 'application/vnd.google-apps.document':
+            request = drive_service.files().export_media(fileId=file_id, mimeType="text/plain")
+        # Si es un archivo de texto/markdown, se debe "descargar"
+        else:
+            request = drive_service.files().get_media(fileId=file_id)
+        
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
@@ -69,35 +77,44 @@ def get_doc_content(_doc_id):
             status, done = downloader.next_chunk()
         return fh.getvalue().decode('utf-8')
     except HttpError as error:
-        # Silenciamos errores de conversión para no detener el proceso
-        print(f"No se pudo convertir el doc {_doc_id}: {error}")
+        print(f"No se pudo procesar el archivo {doc_object.get('name', file_id)}: {error}")
         return ""
 
 def create_vector_db(docs):
     """
     Toma una lista de documentos, los divide en fragmentos y crea una base de datos
-    vectorial (FAISS) para búsquedas de similitud.
+    vectorial para búsquedas de similitud.
     """
+    # Importaciones de LangChain aquí para mantener el código organizado
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import FAISS
+
     if not docs:
         return None
     
     with st.status("Construyendo base de conocimiento...", expanded=True) as status:
-        all_texts = ""
+        all_texts_with_metadata = []
         for i, doc in enumerate(docs):
             status.write(f"📄 Leyendo documento {i+1}/{len(docs)}: {doc['name']}...")
-            content = get_doc_content(doc['id'])
-            all_texts += content + "\n\n"
-            time.sleep(0.1) # Pequeña pausa para que la UI se actualice
+            content = get_doc_content(doc)
+            if content:
+                # Añadimos el nombre del archivo como metadato
+                # Esto es útil para saber de dónde viene la información
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+                chunks = text_splitter.create_documents([content], metadatas=[{"source": doc['name']}])
+                all_texts_with_metadata.extend(chunks)
+            time.sleep(0.1)
 
-        status.write("쪼 Dividiendo textos en fragmentos...")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        chunks = text_splitter.split_text(all_texts)
-        
+        if not all_texts_with_metadata:
+             st.warning("No se pudo leer contenido de ningún documento.")
+             return None
+
         status.write("🧠 Creando 'embeddings' (representaciones numéricas)...")
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         
         status.write("💾 Construyendo el índice de búsqueda...")
-        vector_db = FAISS.from_texts(chunks, embedding=embeddings)
+        vector_db = FAISS.from_documents(all_texts_with_metadata, embedding=embeddings)
         
         status.update(label="¡Base de conocimiento lista!", state="complete")
     
@@ -107,7 +124,6 @@ def create_vector_db(docs):
 st.title("📚 IA de Base de Conocimiento (Google Drive)")
 st.markdown("Proporciona una URL de una carpeta de Google Drive para crear una base de conocimiento y luego haz preguntas sobre su contenido.")
 
-# Inicializar el estado de la sesión
 if 'vector_db' not in st.session_state:
     st.session_state.vector_db = None
 
@@ -121,12 +137,13 @@ with st.container(border=True):
     if st.button("Indexar Carpeta", type="primary", use_container_width=True):
         if folder_url:
             try:
-                folder_id = folder_url.split('/')[-1]
+                # Limpia la URL para obtener solo el ID de la carpeta
+                folder_id = folder_url.split('/')[-1].split('?')[0]
                 all_docs = get_all_docs_from_folder(folder_id)
                 if all_docs:
                     st.session_state.vector_db = create_vector_db(all_docs)
                 else:
-                    st.warning("No se encontraron documentos de Google en la carpeta o subcarpetas.")
+                    st.warning("No se encontraron documentos de Google o archivos de texto (.md, .txt) en la carpeta o subcarpetas.")
             except (IndexError, AttributeError):
                 st.error("URL de carpeta no válida.")
         else:
@@ -145,30 +162,26 @@ with st.container(border=True):
     if st.button("Obtener Respuesta", use_container_width=True, disabled=(st.session_state.vector_db is None)):
         if question:
             with st.spinner("🧠 Buscando en la base de conocimiento y generando respuesta..."):
-                # Configura el modelo de lenguaje de Gemini
-                llm = genai.GenerativeModel('gemini-1.5-flash-latest')
+                from langchain_google_genai import ChatGoogleGenerativeAI
                 
-                # Realiza la búsqueda de similitud y obtén los fragmentos relevantes
+                llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3)
                 retriever = st.session_state.vector_db.as_retriever()
-                relevant_docs = retriever.get_relevant_documents(question)
-                context = "\n\n".join([doc.page_content for doc in relevant_docs])
-
-                # Crea el prompt final
-                prompt = f"""
-                Actúa como un analista experto. Tu única fuente de verdad es el siguiente CONTEXTO.
-                Responde la PREGUNTA del usuario de forma clara y concisa basándote exclusivamente en la información del CONTEXTO.
-                Si la respuesta no se encuentra en el CONTEXTO, indica que no tienes suficiente información.
-
-                --- CONTEXTO ---
-                {context}
-                --- FIN DEL CONTEXTO ---
-
-                PREGUNTA: {question}
-                """
                 
-                response = llm.generate_content(prompt)
+                # Usamos una cadena de LangChain para manejar el flujo de Q&A
+                from langchain.chains.question_answering import load_qa_chain
+                chain = load_qa_chain(llm, chain_type="stuff")
+                
+                relevant_docs = retriever.get_relevant_documents(question)
+                
+                response = chain.invoke({"input_documents": relevant_docs, "question": question})
+                
                 st.success("Respuesta generada:")
-                st.markdown(response.text)
+                st.markdown(response['output_text'])
+
+                with st.expander("Ver fuentes utilizadas"):
+                    sources = {doc.metadata['source'] for doc in relevant_docs}
+                    for source in sources:
+                        st.write(f"- {source}")
         else:
             st.warning("Por favor, escribe una pregunta.")
 
